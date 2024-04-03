@@ -1,0 +1,486 @@
+---
+title: "Final"
+author: "Ayush Kris avk4003"
+date: "2023-07-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(data.table)
+library(ISLR)
+library(e1071)
+library(MASS)
+library(class)
+library(bestglm)
+library(glmnet)
+library(caret)
+library(tree)
+library(randomForest)
+library(gbm)
+data <- fread("baselines.csv")
+sub_data <- fread("lab_and_vitals.csv")
+```
+
+Vital signs are automatically extracted with much higher frequencies than lab values and missing indicator is either irrelevant or uninformative.
+
+```{r, warning=FALSE, message=FALSE}
+sub_data$timestamp <- as.POSIXct(sub_data$time_stamp, format = "%Y-%m-%d %H:%M:%S")
+sub_data<-na.omit(sub_data)
+
+aggregated_vitals_data <- sub_data %>%
+  group_by(subject) %>%
+  arrange(timestamp) %>%   # Sort by timestamp for each patient
+  mutate(days_since_earliest = as.numeric(difftime(timestamp, min(timestamp), units = "days")))  %>%  # Calculate days since earliest timestamp
+group_by(subject, name) %>%
+summarise(
+  mean_vital = mean(value), stdev_vital = sd(value), slope_vital = lm(value ~ days_since_earliest)$coefficients[2]) %>%
+pivot_wider(names_from = name, values_from = c(mean_vital, stdev_vital, slope_vital))
+
+
+```
+
+## First, without vitals data
+
+-Pruned Tree
+
+```{r}
+# normal pruned tree
+tree_data <- data
+tree_data$sex.factor <- factor(tree_data$sex.factor, levels = c("Female", "Male"))
+tree_data$hypoxia_ed.factor <- factor(tree_data$hypoxia_ed.factor, levels = c("No", "Yes"))
+tree_data$smoke_vape <- factor(tree_data$smoke_vape, levels = c("No", "Yes"))
+tree_data$dm.factor <- factor(tree_data$dm.factor, levels = c("No", "Yes"))
+tree_data$htn.factor <- factor(tree_data$htn.factor, levels = c("No", "Yes"))
+tree_data$pulm___1.factor <- factor(tree_data$pulm___1.factor, levels = c("Checked", "Unchecked"))
+tree_data$renal___1.factor <- factor(tree_data$renal___1.factor, levels = c("Checked", "Unchecked"))
+tree_data$renal___2.factor <- factor(tree_data$renal___2.factor, levels = c("Unchecked", "Checked"))
+tree_data$cad.factor <- factor(tree_data$cad.factor, levels = c("No", "Yes"))
+tree_data$cancer <- factor(tree_data$cancer, levels = c("No", "Yes"))
+tree_data$any_immunosuppression <- factor(tree_data$any_immunosuppression, levels = c("unknown/No", "Yes"))
+tree_data$symptoms___1.factor <- factor(tree_data$symptoms___1.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___2.factor <- factor(tree_data$symptoms___2.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___10.factor <- factor(tree_data$symptoms___10.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___9.factor <- factor(tree_data$symptoms___9.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___8.factor <- factor(tree_data$symptoms___8.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___3.factor <- factor(tree_data$symptoms___3.factor, levels = c("Unchecked", "Checked"))
+tree_data$first_cxr_results___0.factor <- factor(tree_data$first_cxr_results___0.factor, levels = c("Unchecked", "Checked"))
+tree_data$first_cxr_results___1.factor <- factor(tree_data$first_cxr_results___1.factor, levels = c("Unchecked", "Checked"))
+tree_data$first_cxr_results___2.factor <- factor(tree_data$first_cxr_results___2.factor, levels = c("Unchecked", "Checked"))
+tree_data$first_cxr_results___3.factor <- factor(tree_data$first_cxr_results___3.factor, levels = c("Unchecked", "Checked"))
+tree_data$Ed_before_order_set <- factor(tree_data$Ed_before_order_set, levels = c("No", "Yes"))
+tree_data$event <- factor(tree_data$event, levels = c("No", "Yes"))
+tree_data <- tree_data[,-1]
+
+set.seed(100)  # Set seed for reproducibility
+train_indices <- sample(nrow(tree_data), 0.7 * nrow(tree_data))  # 70% for training
+train_data_baseline <- tree_data[train_indices, ]
+test_data_baseline <- tree_data[-train_indices, ]
+
+tree_model <- tree(event ~. -event, data=train_data_baseline, method = "gini")
+prune_tree <- cv.tree(tree_model , FUN = prune.misclass, K=10)
+
+plot (prune_tree$size , prune_tree$dev, type = "b")
+plot (prune_tree$k, prune_tree$dev, type = "b")
+
+
+```
+
+```{r}
+final.tree = prune.tree(tree_model,best=4)
+plot(final.tree); text(final.tree,pretty=3,digits=3)
+```
+
+```{r}
+tree.pred <- predict(final.tree , test_data_baseline[,-26], type = "class")
+table(tree.pred , test_data_baseline$event)
+tmp<-table(tree.pred , test_data_baseline$event)
+1-sum(diag(tmp)/sum(tmp))
+
+```
+
+Bagging
+
+```{r}
+bag_model <- randomForest(event ~.-event, data = train_data_baseline, mtry = 25, ntree = 10000, importance=TRUE)
+plot(bag_model$err.rate[,"OOB"], type = "l")
+varImpPlot(bag_model,main = "Bagged tree")
+tree.pred <- predict(bag_model , test_data_baseline[,-26], type = "class")
+table(tree.pred , test_data_baseline$event)
+tmp<-table(tree.pred , test_data_baseline$event)
+1-sum(diag(tmp)/sum(tmp))
+```
+
+Random Forest
+
+```{r}
+params <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+mtry <- sqrt(25)
+rf_model_cv <- train(event~., data=train_data_baseline, method="rf", metric="Accuracy", tuneLength=15, trControl=params)
+print(rf_model_cv)
+plot(rf_model_cv)
+```
+
+```{r}
+rf_model <- randomForest(event~.-event,data=train_data_baseline,mtry=3,ntree=10000,importance=TRUE)
+plot(rf_model$err.rate[,"OOB"], type="l")
+
+tree.pred <- predict(rf_model , test_data_baseline[,-26], type = "class")
+table(tree.pred , test_data_baseline$event)
+tmp<-table(tree.pred , test_data_baseline$event)
+1-sum(diag(tmp)/sum(tmp))
+```
+
+```{r}
+varImpPlot(rf_model,main = "Random Forest")
+
+```
+
+Logistic Regression/Elastic
+
+```{r}
+tree_data$sex.factor <- as.numeric(tree_data$sex.factor)-1
+tree_data$hypoxia_ed.factor <- as.numeric(tree_data$hypoxia_ed.factor)-1
+tree_data$smoke_vape <- as.numeric(tree_data$smoke_vape)-1
+tree_data$dm.factor <- as.numeric(tree_data$dm.factor)-1
+tree_data$htn.factor <- as.numeric(tree_data$htn.factor)-1
+tree_data$pulm___1.factor <- as.numeric(tree_data$pulm___1.factor)-1
+tree_data$renal___1.factor <- as.numeric(tree_data$renal___1.factor)-1
+tree_data$renal___2.factor <- as.numeric(tree_data$renal___2.factor)-1
+tree_data$cad.factor <- as.numeric(tree_data$cad.factor)-1
+tree_data$cancer <- as.numeric(tree_data$cancer)-1
+tree_data$any_immunosuppression <- as.numeric(tree_data$any_immunosuppression)-1
+tree_data$symptoms___1.factor <- as.numeric(tree_data$symptoms___1.factor)-1
+tree_data$symptoms___2.factor <- as.numeric(tree_data$symptoms___2.factor)-1
+tree_data$symptoms___10.factor <- as.numeric(tree_data$symptoms___10.factor)-1
+tree_data$symptoms___9.factor <- as.numeric(tree_data$symptoms___9.factor)-1
+tree_data$symptoms___8.factor <- as.numeric(tree_data$symptoms___8.factor)-1
+tree_data$symptoms___3.factor <- as.numeric(tree_data$symptoms___3.factor)-1
+tree_data$first_cxr_results___0.factor <- as.numeric(tree_data$first_cxr_results___0.factor)-1
+tree_data$first_cxr_results___1.factor <- as.numeric(tree_data$first_cxr_results___1.factor)-1
+tree_data$first_cxr_results___2.factor <- as.numeric(tree_data$first_cxr_results___2.factor)-1
+tree_data$first_cxr_results___3.factor <- as.numeric(tree_data$first_cxr_results___3.factor)-1
+tree_data$Ed_before_order_set <- as.numeric(tree_data$Ed_before_order_set)-1
+tree_data$event <-as.numeric(tree_data$event)-1
+
+scaled_data <- tree_data
+scaled_data_without_event <- scaled_data %>% dplyr::select(-event)
+
+# Scale the selected columns (all except "event")
+#scaled_data_without_event <- scale(scaled_data_without_event)
+scaled_data_without_event <- as.data.frame(scaled_data_without_event)
+# Combine the scaled columns with the "event" column
+scaled_data_final <- cbind(scaled_data_without_event, scaled_data$event)
+scaled_data_final <- as.data.frame(scaled_data_final)
+
+colnames(scaled_data_final)[colnames(scaled_data_final) == "scaled_data$event"] <- "event"
+set.seed(100)
+
+train_indices <- sample(nrow(scaled_data_final), 0.7 * nrow(scaled_data_final))  # 70% for training
+train_data <- as.data.frame(scaled_data_final[train_indices, ])
+test_data <- as.data.frame(scaled_data_final[-train_indices, ])
+
+x_train <- train_data %>% dplyr::select(-event)
+y_train<-train_data$event
+x_test<- test_data %>% dplyr::select(-event)
+y_test<-test_data$event
+
+
+cv_10 = trainControl(method = "cv", number = 10)
+
+elastic_model = train(
+  as.factor(event) ~ ., data = train_data,
+  method = "glmnet",
+  trControl = cv_10, tuneLength = 100
+)
+index<-which(rownames(elastic_model$results) == rownames(elastic_model$bestTune))
+elastic_model$results[index, ]
+alpha <- elastic_model$results[index, ][[1]]
+lambda <- elastic_model$results[index, ][[2]]
+
+elastic_net_model <-glmnet(x_train, y_train, family = "binomial", alpha = alpha, lambda = lambda)
+predictions <- predict(elastic_net_model, as.matrix(x_test), type = "response")
+
+binary_predictions <- ifelse(predictions > 0.5, 1, 0)
+
+# Calculate prediction error
+1-mean(binary_predictions != y_test)
+
+```
+
+```{r}
+
+coef_df <- as.matrix(coef(elastic_net_model))
+
+# Arrange the coefficients in descending order based on their absolute values
+coef_df <- as.data.frame(coef_df)
+coef_df <- coef_df %>%
+  arrange(desc(abs(.[, 1])))
+
+# Display the coefficients in a nice table using kable
+knitr::kable(coef_df)
+
+```
+
+## All Data
+
+```{r}
+final_data <- merge(data, aggregated_vitals_data, by.x = "mrn", by.y = "subject", all = FALSE)
+
+tree_data <- final_data
+
+tree_data$sex.factor <- factor(tree_data$sex.factor, levels = c("Female", "Male"))
+tree_data$hypoxia_ed.factor <- factor(tree_data$hypoxia_ed.factor, levels = c("No", "Yes"))
+tree_data$smoke_vape <- factor(tree_data$smoke_vape, levels = c("No", "Yes"))
+tree_data$dm.factor <- factor(tree_data$dm.factor, levels = c("No", "Yes"))
+tree_data$htn.factor <- factor(tree_data$htn.factor, levels = c("No", "Yes"))
+tree_data$pulm___1.factor <- factor(tree_data$pulm___1.factor, levels = c("Checked", "Unchecked"))
+tree_data$renal___1.factor <- factor(tree_data$renal___1.factor, levels = c("Checked", "Unchecked"))
+tree_data$renal___2.factor <- factor(tree_data$renal___2.factor, levels = c("Unchecked", "Checked"))
+tree_data$cad.factor <- factor(tree_data$cad.factor, levels = c("No", "Yes"))
+tree_data$cancer <- factor(tree_data$cancer, levels = c("No", "Yes"))
+tree_data$any_immunosuppression <- factor(tree_data$any_immunosuppression, levels = c("unknown/No", "Yes"))
+tree_data$symptoms___1.factor <- factor(tree_data$symptoms___1.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___2.factor <- factor(tree_data$symptoms___2.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___10.factor <- factor(tree_data$symptoms___10.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___9.factor <- factor(tree_data$symptoms___9.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___8.factor <- factor(tree_data$symptoms___8.factor, levels = c("Unchecked", "Checked"))
+tree_data$symptoms___3.factor <- factor(tree_data$symptoms___3.factor, levels = c("Unchecked", "Checked"))
+tree_data$first_cxr_results___0.factor <- factor(tree_data$first_cxr_results___0.factor, levels = c("Unchecked", "Checked"))
+tree_data$first_cxr_results___1.factor <- factor(tree_data$first_cxr_results___1.factor, levels = c("Unchecked", "Checked"))
+tree_data$first_cxr_results___2.factor <- factor(tree_data$first_cxr_results___2.factor, levels = c("Unchecked", "Checked"))
+tree_data$first_cxr_results___3.factor <- factor(tree_data$first_cxr_results___3.factor, levels = c("Unchecked", "Checked"))
+tree_data$Ed_before_order_set <- factor(tree_data$Ed_before_order_set, levels = c("No", "Yes"))
+tree_data$event <- factor(tree_data$event, levels = c("No", "Yes"))
+
+tree_data <- tree_data[,-1]
+
+colnames(tree_data)[colnames(tree_data) == "mean_vital_vs_bp_noninvasive (s)"] <- "mean_vital_vs_bp_noninvasive_s"
+colnames(tree_data)[colnames(tree_data) == "mean_vital_s_bp_noninvasive (d)"] <- "mean_vital_s_bp_noninvasive_d"
+colnames(tree_data)[colnames(tree_data) == "stdev_vital_vs_bp_noninvasive (s)"] <- "stdev_vital_vs_bp_noninvasive_s"
+colnames(tree_data)[colnames(tree_data) == "stdev_vital_s_bp_noninvasive (d)"] <- "stdev_vital_s_bp_noninvasive_d"
+colnames(tree_data)[colnames(tree_data) == "slope_vital_vs_bp_noninvasive (s)"] <- "slope_vital_vs_bp_noninvasive_s"
+colnames(tree_data)[colnames(tree_data) == "slope_vital_s_bp_noninvasive (d)"] <- "slope_vital_s_bp_noninvasive_d"
+
+
+set.seed(100)  # Set seed for reproducibility
+train_indices <- sample(nrow(tree_data), 0.7 * nrow(tree_data))  # 70% for training
+train_data <- tree_data[train_indices, ]
+test_data <- tree_data[-train_indices, ]
+
+tree_model <- tree(event ~. -event, data=train_data, method = "gini")
+
+prune_tree <- cv.tree(tree_model , FUN = prune.misclass, K=10)
+
+plot (prune_tree$size , prune_tree$dev, type = "b")
+plot (prune_tree$k, prune_tree$dev, type = "b")
+
+
+```
+
+```{r}
+final.tree = prune.tree(tree_model,best=8)
+plot(final.tree); text(final.tree,pretty=3,digits=3)
+tree.pred <- predict(final.tree , test_data, type = "class")
+table(tree.pred , test_data$event)
+tmp<-table(tree.pred , test_data$event)
+1-sum(diag(tmp)/sum(tmp))
+
+```
+
+Bagging:
+
+The number of trees B is not a critical parameter with bagging; using a very large value of B will not lead to overfitting. In practice we use a value of B sufficiently large that the error has settled down.
+
+```{r}
+bag_model <- randomForest(event ~.-event, data = train_data, mtry = 40, ntree = 10000, importance=TRUE)
+plot(bag_model$err.rate[,"OOB"], type = "l")
+varImpPlot(bag_model,main = "Bagged tree")
+
+```
+
+```{r}
+tree.pred <- predict(bag_model , test_data, type = "class")
+table(tree.pred , test_data$event)
+tmp<-table(tree.pred , test_data$event)
+1-sum(diag(tmp)/sum(tmp))
+```
+
+```{r}
+
+new_model <- randomForest(event ~. -event, data = train_data, xtest = test_data[,-26], ytest = test_data$event, mtry = 40, ntree = 10000, importance=TRUE)
+
+plot(new_model$err.rate[,"OOB"], type = "l")
+plot(new_model$test$err.rate[,"Test"], type = "l")
+
+
+```
+
+Random Forest. Since bagging regression trees typically suffers from tree correlation, random forest builds a large collection og de-correlated trees. Easy to tune. Primary concern is to have large enough trees to stabilise the error, and most importantly, the number of variables to randomly sample as candidates at each split
+
+```{r}
+
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+mtry <- sqrt(40)
+rf_random <- train(event~., data=train_data, method="rf", metric="Accuracy", tuneLength=15, trControl=control)
+print(rf_random)
+plot(rf_random)
+```
+
+```{r}
+rf_model <- randomForest(event~.-event,data=train_data,mtry=12,ntree=10000,importance=TRUE)
+plot(rf_model$err.rate[,"OOB"], type="l")
+
+```
+
+```{r}
+tree.pred <- predict(rf_model , test_data, type = "class")
+table(tree.pred , test_data$event)
+tmp<-table(tree.pred , test_data$event)
+1-sum(diag(tmp)/sum(tmp))
+```
+
+```{r}
+varImpPlot(rf_model,main = "Random Forest")
+
+```
+
+simple Logistic/Elastic/Lasso.Ridge
+
+lasso has a major advantage over ridge regression, in that it produces simpler and more interpretable models that involve only a subset of the predictors. However, which method leads to better prediction accuracy?
+
+```{r}
+tree_data$sex.factor <- as.numeric(tree_data$sex.factor)-1
+tree_data$hypoxia_ed.factor <- as.numeric(tree_data$hypoxia_ed.factor)-1
+tree_data$smoke_vape <- as.numeric(tree_data$smoke_vape)-1
+tree_data$dm.factor <- as.numeric(tree_data$dm.factor)-1
+tree_data$htn.factor <- as.numeric(tree_data$htn.factor)-1
+tree_data$pulm___1.factor <- as.numeric(tree_data$pulm___1.factor)-1
+tree_data$renal___1.factor <- as.numeric(tree_data$renal___1.factor)-1
+tree_data$renal___2.factor <- as.numeric(tree_data$renal___2.factor)-1
+tree_data$cad.factor <- as.numeric(tree_data$cad.factor)-1
+tree_data$cancer <- as.numeric(tree_data$cancer)-1
+tree_data$any_immunosuppression <- as.numeric(tree_data$any_immunosuppression)-1
+tree_data$symptoms___1.factor <- as.numeric(tree_data$symptoms___1.factor)-1
+tree_data$symptoms___2.factor <- as.numeric(tree_data$symptoms___2.factor)-1
+tree_data$symptoms___10.factor <- as.numeric(tree_data$symptoms___10.factor)-1
+tree_data$symptoms___9.factor <- as.numeric(tree_data$symptoms___9.factor)-1
+tree_data$symptoms___8.factor <- as.numeric(tree_data$symptoms___8.factor)-1
+tree_data$symptoms___3.factor <- as.numeric(tree_data$symptoms___3.factor)-1
+tree_data$first_cxr_results___0.factor <- as.numeric(tree_data$first_cxr_results___0.factor)-1
+tree_data$first_cxr_results___1.factor <- as.numeric(tree_data$first_cxr_results___1.factor)-1
+tree_data$first_cxr_results___2.factor <- as.numeric(tree_data$first_cxr_results___2.factor)-1
+tree_data$first_cxr_results___3.factor <- as.numeric(tree_data$first_cxr_results___3.factor)-1
+tree_data$Ed_before_order_set <- as.numeric(tree_data$Ed_before_order_set)-1
+tree_data$event <-as.numeric(tree_data$event)-1
+
+set.seed(100)  # Set seed for reproducibility
+train_indices <- sample(nrow(tree_data), 0.7 * nrow(tree_data))  # 70% for training
+train_data <- tree_data[train_indices, ]
+test_data <- tree_data[-train_indices, ]
+
+
+```
+
+```{r}
+scaled_data <- tree_data
+scaled_data_without_event <- scaled_data %>% dplyr::select(-event)
+
+# Scale the selected columns (all except "event")
+#scaled_data_without_event <- scale(scaled_data_without_event)
+scaled_data_without_event <- as.data.frame(scaled_data_without_event)
+# Combine the scaled columns with the "event" column
+scaled_data_final <- cbind(scaled_data_without_event, scaled_data$event)
+scaled_data_final <- as.data.frame(scaled_data_final)
+
+colnames(scaled_data_final)[colnames(scaled_data_final) == "scaled_data$event"] <- "event"
+
+
+train_indices <- sample(nrow(scaled_data_final), 0.7 * nrow(scaled_data_final))  # 70% for training
+train_data <- as.data.frame(scaled_data_final[train_indices, ])
+test_data <- as.data.frame(scaled_data_final[-train_indices, ])
+
+x_train <- train_data %>% dplyr::select(-event)
+y_train<-train_data$event
+x_test<- test_data %>% dplyr::select(-event)
+y_test<-test_data$event
+
+
+cv_10 = trainControl(method = "cv", number = 10)
+
+elastic_model = train(
+  as.factor(event) ~ ., data = train_data,
+  method = "glmnet",
+  trControl = cv_10, tuneLength = 100
+)
+index<-which(rownames(elastic_model$results) == rownames(elastic_model$bestTune))
+elastic_model$results[index, ]
+alpha <- elastic_model$results[index, ][[1]]
+lambda <- elastic_model$results[index, ][[2]]
+
+elastic_net_model <-glmnet(x_train, y_train, family = "binomial", alpha = alpha, lambda = lambda)
+predictions <- predict(elastic_net_model, as.matrix(x_test), type = "response")
+
+binary_predictions <- ifelse(predictions > 0.5, 1, 0)
+
+# Calculate prediction error
+mean(binary_predictions != y_test)
+
+```
+
+```{r}
+
+coef_df <- as.matrix(coef(elastic_net_model))
+
+# Arrange the coefficients in descending order based on their absolute values
+coef_df <- as.data.frame(coef_df)
+coef_df <- coef_df %>%
+  arrange(desc(abs(.[, 1])))
+
+# Display the coefficients in a nice table using kable
+knitr::kable(coef_df)
+```
+
+To confirm the precious result of elastic regression, we tune for lambda with fixed alpha values of 0, 0.5, and 1. We see that the error of the elastic model is lowest.
+
+```{r}
+grid =10^seq(10,-2,length =100)
+
+cv1=cv.glmnet(as.matrix(x_train), y_train, family = "binomial",lambda=grid,alpha=1, nfolds =10,type.measure="class")
+cv1$lambda.min
+elastic_net_model <-glmnet(x_train, y_train, family = "binomial", alpha = 1, lambda = cv1$lambda.min)
+predictions <- predict(elastic_net_model, as.matrix(x_test), type = "response")
+
+binary_predictions <- ifelse(predictions > 0.5, 1, 0)
+
+# Calculate prediction error
+1-mean(binary_predictions != y_test)
+
+
+cv.5=cv.glmnet(as.matrix(x_train),y_train,family = "binomial",lambda=grid,alpha=.5,nfolds =10,type.measure="class")
+cv.5$lambda.min	
+
+elastic_net_model <-glmnet(x_train, y_train, family = "binomial", alpha = 1, lambda = cv.5$lambda.min)
+predictions <- predict(elastic_net_model, as.matrix(x_test), type = "response")
+
+binary_predictions <- ifelse(predictions > 0.5, 1, 0)
+
+# Calculate prediction error
+1-mean(binary_predictions != y_test)
+
+cv0=cv.glmnet(as.matrix(x_train),y_train,family = "binomial",lambda=grid,alpha=0,nfolds =10,type.measure="class")
+cv0$lambda.min	
+elastic_net_model <-glmnet(x_train, y_train, family = "binomial", alpha = 1, lambda = cv0$lambda.min)
+predictions <- predict(elastic_net_model, as.matrix(x_test), type = "response")
+
+binary_predictions <- ifelse(predictions > 0.5, 1, 0)
+
+# Calculate prediction error
+1-mean(binary_predictions != y_test)
+
+
+```
